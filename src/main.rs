@@ -13,7 +13,7 @@ use simple_prometheus_exporter::{Exporter, export};
 #[structopt(name = "sds011-exporter")]
 struct Options {
   /// port for the http server
-  #[structopt(long, short, default_value = "8080", env = "CO2_PORT")]
+  #[structopt(long, short, default_value = "8080", env = "SDS011_PORT")]
   port: u16,
 }
 
@@ -47,10 +47,6 @@ fn read_thread(
     error!("sensor thread exited unexpectedly; refer to the log for details");
     std::process::exit(1);
   });
-}
-
-fn c_to_f(temp: f32) -> f32 {
-  temp * (9f32 / 5f32) + 32f32
 }
 
 fn export_reading(
