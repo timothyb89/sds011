@@ -3,6 +3,7 @@
 use std::sync::{Arc, RwLock};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
+use std::time::Duration;
 
 use structopt::StructOpt;
 use warp::Filter;
@@ -32,6 +33,8 @@ fn read_thread(
   thread::spawn(move || {
     loop {
       let reading = MaybeReading::None; // TODO
+
+      thread::sleep(Duration::from_millis(1000));
 
       let mut latest_reading = match reading_lock.write() {
         Ok(r) => r,
