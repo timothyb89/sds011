@@ -1,25 +1,42 @@
 #[macro_use] extern crate log;
 
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
 use std::time::Duration;
 
+use anyhow::{Result, Error, Context};
 use structopt::StructOpt;
 use warp::Filter;
 use serde_json::{self, json};
 use simple_prometheus_exporter::{Exporter, export};
+use tokio::sync::mpsc::{channel, Sender, Receiver};
+use tokio::prelude::*;
+use tokio_serial::*;
+use tokio_util::codec::{Encoder, Decoder};
+
+use sds011_exporter;
 
 #[derive(Debug, Clone, StructOpt)]
 #[structopt(name = "sds011-exporter")]
 struct Options {
+  /// sensor serial device, e.g. /dev/ttyUSB0
+  #[structopt(parse(from_os_str))]
+  device: PathBuf,
+
   /// port for the http server
   #[structopt(long, short, default_value = "8080", env = "SDS011_PORT")]
   port: u16,
 }
 
+struct Reading {
+  pm25: f32,
+  pm10: f32
+}
+
 enum MaybeReading {
-  Ok(()),
+  Ok(Reading),
   Err(()),
   None
 }
@@ -81,6 +98,8 @@ async fn main() {
 
   let opts = Options::from_args();
   let port = opts.port;
+
+
 
   let error_count = Arc::new(AtomicUsize::new(0));
   let latest_reading_lock = Arc::new(RwLock::new(MaybeReading::None));
