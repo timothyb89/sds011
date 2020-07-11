@@ -5,18 +5,16 @@ use std::sync::{Arc, RwLock};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
 use std::time::Duration;
+use std::sync::mpsc::channel;
 
 use anyhow::{Result, Error, Context};
 use structopt::StructOpt;
 use warp::Filter;
 use serde_json::{self, json};
 use simple_prometheus_exporter::{Exporter, export};
-use tokio::sync::mpsc::{channel, Sender, Receiver};
 use tokio::prelude::*;
-use tokio_serial::*;
-use tokio_util::codec::{Encoder, Decoder};
 
-use sds011_exporter;
+use sds011_exporter::*;
 
 #[derive(Debug, Clone, StructOpt)]
 #[structopt(name = "sds011-exporter")]
@@ -92,8 +90,50 @@ fn export_reading(
   s.to_string()
 }
 
+fn main() -> Result<()> {
+  env_logger::init();
+
+  let opts = Options::from_args();
+  let port = opts.port;
+
+  let (command_tx, command_rx) = channel();
+  let (response_tx, response_rx) = channel();
+  let (control_tx, control_rx) = channel();
+
+  sds011_exporter::open_sensor(
+    &opts.device,
+    command_rx,
+    response_tx,
+    control_tx
+  )?;
+
+  loop {
+    for response in response_rx.try_iter() {
+      info!("response: {:?}", response);
+    }
+
+    for control in control_rx.try_iter() {
+      info!("control msg: {:?}", control);
+
+      match control {
+        ControlMessage::Error(e) => {
+          error!("error: {}", e);
+        },
+        ControlMessage::FatalError(e) => {
+          error!("fatal error: {}", e);
+          std::process::exit(1);
+        }
+      }
+    }
+
+    thread::sleep(Duration::from_micros(1000));
+  }
+
+  Ok(())
+}
+
 #[tokio::main]
-async fn main() {
+async fn main_later() {
   env_logger::init();
 
   let opts = Options::from_args();
