@@ -39,47 +39,6 @@ pub enum Error {
 
 type Result<T> = std::result::Result<T, Error>;
 
-#[derive(Debug)]
-pub struct SetReportingModeResponse {
-  pub query: bool,
-  pub active: bool,
-  pub device: u16
-}
-
-#[derive(Debug)]
-pub struct QueryResponse {
-  // PM2.5 reading in micrograms per cubic meter
-  pub pm25: f32,
-
-  // PM10 reading in micrograms per cubic meter
-  pub pm10: f32,
-
-  // 2-byte device ID
-  pub device: u16
-}
-
-#[derive(Debug)]
-pub struct SetDeviceIdResponse;
-
-#[derive(Debug)]
-pub struct SetSleepWorkResponse;
-
-#[derive(Debug)]
-pub struct SetWorkingPeriodResponse;
-
-#[derive(Debug)]
-pub struct GetFirmwareVersionResponse;
-
-#[derive(Debug)]
-pub enum Response {
-  SetReportingMode(SetReportingModeResponse),
-  Query(QueryResponse),
-  SetDeviceId(SetDeviceIdResponse),
-  SetSleepWork(SetSleepWorkResponse),
-  SetWorkingPeriod(SetWorkingPeriodResponse),
-  GetFirmwareVersion(GetFirmwareVersionResponse)
-}
-
 fn checksum(bytes: &[u8]) -> u8 {
   let sum: u16 = bytes.iter().map(|b| *b as u16).sum();
 
@@ -100,6 +59,7 @@ pub trait Command {
 
   fn write(&self, bytes: &mut BytesMut) {
     bytes.put_u8(0xAA);
+    bytes.put_u8(self.id());
 
     let mut data_bytes = BytesMut::new();
     self.data(&mut data_bytes);
@@ -110,6 +70,236 @@ pub trait Command {
     bytes.put_u8(0xAB);
   }
 }
+
+/// A command that can be sent to the sensor
+#[derive(Debug)]
+pub enum Cmd {
+  SetReportingMode(SetReportingMode),
+  Query(Query),
+  SetDeviceId(SetDeviceId),
+  SetSleepWork(SetSleepWork),
+  SetWorkingPeriod(SetWorkingPeriod),
+  GetFirmwareVersion(GetFirmwareVersion)
+}
+
+impl Deref for Cmd {
+  type Target = dyn Command;
+
+  fn deref(&self) -> &Self::Target {
+    match self {
+      Cmd::SetReportingMode(c) => c,
+      Cmd::Query(c) => c,
+      Cmd::SetDeviceId(c) => c,
+      Cmd::SetSleepWork(c) => c,
+      Cmd::SetWorkingPeriod(c) => c,
+      Cmd::GetFirmwareVersion(c) => c,
+    }
+  }
+}
+
+impl<C: Command> From<C> for Cmd {
+  fn from(c: C) -> Self {
+    c.to_cmd()
+  }
+}
+
+
+#[derive(Debug)]
+pub enum Response {
+  SetReportingMode(SetReportingModeResponse),
+  Query(QueryResponse),
+  SetDeviceId(SetDeviceIdResponse),
+  SetSleepWork(SetSleepWorkResponse),
+  SetWorkingPeriod(SetWorkingPeriodResponse),
+  GetFirmwareVersion(GetFirmwareVersionResponse)
+}
+
+trait ResponseParser {
+  fn parse(buf: &[u8]) -> Response;
+}
+
+
+#[derive(Debug)]
+pub enum WorkMode {
+  Sleep,
+  Work
+}
+
+impl WorkMode {
+  fn from_byte(byte: u8) -> Self {
+    match byte {
+      0x00 => WorkMode::Sleep,
+      _ => WorkMode::Work
+    }
+  }
+
+  fn as_byte(&self) -> u8 {
+    match self {
+      WorkMode::Sleep => 0x00,
+      WorkMode::Work => 0x01
+    }
+  }
+}
+
+#[derive(Debug)]
+pub enum WorkingPeriod {
+  /// device operates continuously, reporting a new result roughly every second
+  Continuous,
+
+  /// device sleeps for some number of minutes (sans 30 seconds), wakes for 30
+  /// seconds to collect data, and returns to sleep
+  Periodic(u8)
+}
+
+impl WorkingPeriod {
+  fn from_byte(byte: u8) -> WorkingPeriod {
+    match byte {
+      0 => WorkingPeriod::Continuous,
+      n => WorkingPeriod::Periodic(n)
+    }
+  }
+
+  fn as_byte(&self) -> u8 {
+    match self {
+      WorkingPeriod::Continuous => 0,
+      WorkingPeriod::Periodic(n) => *n
+    }
+  }
+}
+
+#[derive(Debug)]
+pub struct SetReportingModeResponse {
+  pub query: bool,
+  pub active: bool,
+  pub device: u16
+}
+
+impl ResponseParser for SetReportingModeResponse {
+  fn parse(mut buf: &[u8]) -> Response {
+    buf.advance(3);
+    let query = buf.get_u8() == 0x00;
+    let active = buf.get_u8() == 0x00;
+    buf.advance(1);
+    let device = buf.get_u16();
+
+    Response::SetReportingMode(SetReportingModeResponse {
+      query,
+      active,
+      device,
+    })
+  }
+}
+
+#[derive(Debug)]
+pub struct QueryResponse {
+  // PM2.5 reading in micrograms per cubic meter
+  pub pm25: f32,
+
+  // PM10 reading in micrograms per cubic meter
+  pub pm10: f32,
+
+  // 2-byte device ID
+  pub device: u16
+}
+
+impl ResponseParser for QueryResponse {
+  fn parse(mut buf: &[u8]) -> Response {
+    buf.advance(2);
+
+    Response::Query(QueryResponse {
+      pm25: buf.get_u16_le() as f32 / 10f32,
+      pm10: buf.get_u16_le() as f32 / 10f32,
+      device: buf.get_u16(),
+    })
+  }
+}
+
+#[derive(Debug)]
+pub struct SetDeviceIdResponse {
+  // 2-byte device ID
+  device: u16
+}
+
+impl ResponseParser for SetDeviceIdResponse {
+  fn parse(mut buf: &[u8]) -> Response {
+    buf.advance(6); // bytes 3-5 are reserved
+
+    Response::SetDeviceId(SetDeviceIdResponse {
+      device: buf.get_u16()
+    })
+  }
+}
+
+#[derive(Debug)]
+pub struct SetSleepWorkResponse {
+  pub query: bool,
+  pub mode: WorkMode,
+  pub device: u16
+}
+
+impl ResponseParser for SetSleepWorkResponse {
+  fn parse(mut buf: &[u8]) -> Response {
+    buf.advance(3);
+    let query = buf.get_u8() == 0x00;
+    let mode = WorkMode::from_byte(buf.get_u8());
+    buf.advance(1);
+    let device = buf.get_u16();
+
+    Response::SetSleepWork(SetSleepWorkResponse {
+      query,
+      mode,
+      device
+    })
+  }
+}
+
+#[derive(Debug)]
+pub struct SetWorkingPeriodResponse {
+  /// if true, queries the current state; if false, sets the working period
+  pub query: bool,
+  pub working_period: WorkingPeriod,
+  pub device: u16
+}
+
+impl ResponseParser for SetWorkingPeriodResponse {
+  fn parse(mut buf: &[u8]) -> Response {
+    buf.advance(3);
+    let query = buf.get_u8() == 0x00;
+    let working_period = WorkingPeriod::from_byte(buf.get_u8());
+    buf.advance(1);
+    let device = buf.get_u16();
+
+    Response::SetWorkingPeriod(SetWorkingPeriodResponse {
+      query,
+      working_period,
+      device
+    })
+  }
+}
+
+
+#[derive(Debug)]
+pub struct GetFirmwareVersionResponse {
+  /// year in some mystery format
+  pub year: u8,
+  pub month: u8,
+  pub day: u8,
+  pub device: u16
+}
+
+impl ResponseParser for GetFirmwareVersionResponse {
+  fn parse(mut buf: &[u8]) -> Response {
+    buf.advance(3);
+
+    Response::GetFirmwareVersion(GetFirmwareVersionResponse {
+      year: buf.get_u8(),
+      month: buf.get_u8(),
+      day: buf.get_u8(),
+      device: buf.get_u16()
+    })
+  }
+}
+
 
 #[derive(Debug)]
 pub struct SetReportingMode {
@@ -157,7 +347,7 @@ impl Command for Query {
 
 #[derive(Debug)]
 pub struct SetDeviceId {
-  id: u16
+  pub id: u16
 }
 
 impl Command for SetDeviceId {
@@ -173,32 +363,11 @@ impl Command for SetDeviceId {
   }
 }
 
-#[derive(Debug)]
-pub enum WorkMode {
-  Sleep,
-  Work
-}
-
-impl WorkMode {
-  fn from_byte(byte: u8) -> Self {
-    match byte {
-      0x00 => WorkMode::Sleep,
-      _ => WorkMode::Work
-    }
-  }
-
-  fn as_byte(&self) -> u8 {
-    match self {
-      WorkMode::Sleep => 0x00,
-      WorkMode::Work => 0x01
-    }
-  }
-}
 
 #[derive(Debug)]
 pub struct SetSleepWork {
-  query: bool,
-  mode: WorkMode
+  pub query: bool,
+  pub mode: WorkMode
 }
 
 impl Command for SetSleepWork {
@@ -208,7 +377,6 @@ impl Command for SetSleepWork {
     bytes.put_u8(self.mode.as_byte());
     bytes.put(&[0x00; 10][..]);
     bytes.put(&[0xFF; 2][..]);
-    todo!();
   }
 
   fn to_cmd(self) -> Cmd {
@@ -218,13 +386,17 @@ impl Command for SetSleepWork {
 
 #[derive(Debug)]
 pub struct SetWorkingPeriod {
-
+  pub query: bool,
+  pub working_period: WorkingPeriod
 }
 
 impl Command for SetWorkingPeriod {
   fn data(&self, bytes: &mut BytesMut) {
     bytes.put_u8(0x08);
-    todo!();
+    bytes.put_u8(if self.query { 0x00 } else {0x01 });
+    bytes.put_u8(self.working_period.as_byte());
+    bytes.put(&[0x00; 10][..]);
+    bytes.put(&[0xFF; 2][..]);
   }
 
   fn to_cmd(self) -> Cmd {
@@ -233,51 +405,17 @@ impl Command for SetWorkingPeriod {
 }
 
 #[derive(Debug)]
-pub struct GetFirmwareVersion {
-
-}
+pub struct GetFirmwareVersion;
 
 impl Command for GetFirmwareVersion {
   fn data(&self, bytes: &mut BytesMut) {
     bytes.put_u8(0x07);
-    todo!();
+    bytes.put(&[0x00; 12][..]);
+    bytes.put(&[0xFF; 2][..]);
   }
 
   fn to_cmd(self) -> Cmd {
     Cmd::GetFirmwareVersion(self)
-  }
-}
-
-/// A command that can be sent to the sensor
-#[derive(Debug)]
-pub enum Cmd {
-  SetReportingMode(SetReportingMode),
-  Query(Query),
-  SetDeviceId(SetDeviceId),
-  SetSleepWork(SetSleepWork),
-  SetWorkingPeriod(SetWorkingPeriod),
-  GetFirmwareVersion(GetFirmwareVersion)
-}
-
-impl Deref for Cmd {
-  type Target = dyn Command;
-
-  fn deref(&self) -> &Self::Target {
-    match self {
-      Cmd::SetReportingMode(c) => c,
-      Cmd::Query(c) => c,
-      Cmd::SetDeviceId(c) => c,
-      Cmd::SetSleepWork(c) => c,
-      Cmd::SetWorkingPeriod(c) => c,
-      Cmd::GetFirmwareVersion(c) => c,
-    }
-  }
-
-}
-
-impl<C: Command> From<C> for Cmd {
-  fn from(c: C) -> Self {
-    c.to_cmd()
   }
 }
 
@@ -313,35 +451,39 @@ fn parse_packet(packet: &[u8]) -> Result<Response> {
     packet, checksum_calculated, checksum_received
   );
 
-  let mut buf = packet.clone();
-  buf.advance(1);
-  let command = buf.get_u8();
+  let buf = packet.clone();
+  let command = buf[1];
+  let command_extra = buf[2];
 
-  Ok(match command {
-    // TODO: 0xC5 is reused a lot, so this doesn't actually work
-    // actual response depends on the next data byte
-    0xC5 => Response::SetReportingMode(SetReportingModeResponse {
-      query: buf.get_u8() == 0x00,
-      active: buf.get_u8() == 0x00,
-      device: buf.get_u16()
-    }),
+  Ok(match (command, command_extra) {
+    (0xC0, _) => QueryResponse::parse(buf),
 
-    0xC0 => Response::Query(QueryResponse {
-      pm25: buf.get_u16_le() as f32 / 10f32,
-      pm10: buf.get_u16_le() as f32 / 10f32,
-      device: buf.get_u16(),
-    }),
+    (0xC5, 0x02) => SetReportingModeResponse::parse(buf),
+    (0xC5, 0x05) => SetDeviceIdResponse::parse(buf),
+    (0xC5, 0x06) => SetSleepWorkResponse::parse(buf),
+    (0xC5, 0x08) => SetWorkingPeriodResponse::parse(buf),
+    (0xC5, 0x07) => GetFirmwareVersionResponse::parse(buf),
 
-
-    other => return Err(Error::PacketError(format!(
-      "packet ({:x?}) has invalid command: {:x?}",
-      buf, other
+    (other, other_extra) => return Err(Error::PacketError(format!(
+      "packet ({:x?}) has invalid command: {:x?}/{:x?}",
+      buf, other, other_extra
     )))
   })
 }
 
+#[derive(Debug)]
+pub enum ControlMessage {
+  /// A non-fatal error, e.g. a single bad packet
+  Error(Error),
+
+  /// An error that halts either of the read or write threads
+  FatalError(Error),
+}
+
 fn read_thread(port: Box<dyn SerialPort>, tx: Sender<Response>, control_tx: Sender<ControlMessage>) -> JoinHandle<()> {
   thread::spawn(move || {
+    debug!("started read_thread");
+
     let mut current_packet: Option<BytesMut> = None;
 
     for byte in port.bytes() {
@@ -390,12 +532,14 @@ fn read_thread(port: Box<dyn SerialPort>, tx: Sender<Response>, control_tx: Send
 
 fn write_thread(mut port: Box<dyn SerialPort>, rx: Receiver<Cmd>, control_tx: Sender<ControlMessage>) -> JoinHandle<()> {
   thread::spawn(move || {
-    for cmd in rx.try_iter() {
+    debug!("started write_thread");
+
+    for cmd in rx {
       let mut buf = BytesMut::new();
       cmd.write(&mut buf);
 
       match port.write(&buf) {
-        Ok(_) => (),
+        Ok(_) => debug!("sent command: {:?} = {:x?}", cmd, &buf[..]),
         Err(e) => {
           control_tx.send(ControlMessage::FatalError(Error::WriteError(e))).ok();
           break;
@@ -403,15 +547,6 @@ fn write_thread(mut port: Box<dyn SerialPort>, rx: Receiver<Cmd>, control_tx: Se
       }
     }
   })
-}
-
-#[derive(Debug)]
-pub enum ControlMessage {
-  /// A non-fatal error, e.g. a single bad packet
-  Error(Error),
-
-  /// An error that halts either of the read or write threads
-  FatalError(Error),
 }
 
 /// Opens a sensor at the given path

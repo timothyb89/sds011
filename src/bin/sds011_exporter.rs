@@ -107,6 +107,23 @@ fn main() -> Result<()> {
     control_tx
   )?;
 
+  command_tx.send(GetFirmwareVersion.to_cmd()).ok();
+
+  command_tx.send(SetReportingMode {
+    query: true,
+    active: false
+  }.to_cmd()).ok();
+
+  command_tx.send(SetSleepWork {
+    query: true,
+    mode: WorkMode::Work
+  }.to_cmd()).ok();
+
+  command_tx.send(SetWorkingPeriod {
+    query: true,
+    working_period: WorkingPeriod::Continuous
+  }.to_cmd()).ok();
+
   loop {
     for response in response_rx.try_iter() {
       info!("response: {:?}", response);
