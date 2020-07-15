@@ -1,6 +1,8 @@
+use std::convert::TryFrom;
+use std::ffi::OsStr;
 use std::io::{self, Read};
 use std::ops::Deref;
-use std::ffi::OsStr;
+use std::str::FromStr;
 use std::sync::mpsc::{Sender, Receiver};
 use std::thread;
 use std::time::Duration;
@@ -34,7 +36,19 @@ pub enum Error {
   ReadError(#[source] io::Error),
 
   #[error(display = "error sending command: {}", _0)]
-  WriteError(#[source] io::Error)
+  WriteError(#[source] io::Error),
+
+  #[error(display = "invalid work mode: {}", _0)]
+  InvalidWorkMode(String),
+
+  #[error(display = "invalid reporting mode: {}", _0)]
+  InvalidReportingMode(String),
+
+  #[error(display = "invalid working period '{}': {}", period, reason)]
+  InvalidWorkingPeriod {
+    period: String,
+    reason: String
+  }
 }
 
 type Result<T> = std::result::Result<T, Error>;
@@ -72,7 +86,7 @@ pub trait Command {
 }
 
 /// A command that can be sent to the sensor
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Clone)]
 pub enum Cmd {
   SetReportingMode(SetReportingMode),
   Query(Query),
@@ -103,8 +117,7 @@ impl<C: Command> From<C> for Cmd {
   }
 }
 
-
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Clone)]
 pub enum Response {
   SetReportingMode(SetReportingModeResponse),
   Query(QueryResponse),
@@ -118,8 +131,7 @@ trait ResponseParser {
   fn parse(buf: &[u8]) -> Response;
 }
 
-
-#[derive(Debug)]
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub enum WorkMode {
   Sleep,
   Work
@@ -141,7 +153,19 @@ impl WorkMode {
   }
 }
 
-#[derive(Debug)]
+impl FromStr for WorkMode {
+  type Err = Error;
+
+  fn from_str(s: &str) -> Result<Self> {
+    Ok(match s.to_lowercase().as_str() {
+      "work" | "on" => WorkMode::Work,
+      "sleep" | "off" => WorkMode::Sleep,
+      _ => return Err(Error::InvalidWorkMode(s.to_string()))
+    })
+  }
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum WorkingPeriod {
   /// device operates continuously, reporting a new result roughly every second
   Continuous,
@@ -167,10 +191,39 @@ impl WorkingPeriod {
   }
 }
 
-#[derive(Debug)]
+impl TryFrom<usize> for WorkingPeriod {
+  type Error = Error;
+
+  fn try_from(value: usize) -> Result<Self> {
+    match value {
+      0 => Ok(WorkingPeriod::Continuous),
+      1..=30 => Ok(WorkingPeriod::Periodic(value as u8)),
+      _ => Err(Error::InvalidWorkingPeriod {
+        period: value.to_string(),
+        reason: "value out of range (0 <= n <= 30)".into()
+      })
+    }
+  }
+}
+
+impl FromStr for WorkingPeriod {
+  type Err = Error;
+
+  fn from_str(s: &str) -> Result<Self> {
+    let value = s.parse::<usize>()
+      .map_err(|e| Error::InvalidWorkingPeriod {
+        period: s.into(),
+        reason: format!("could not parse int: {}", e)
+      })?;
+
+    WorkingPeriod::try_from(value)
+  }
+}
+
+#[derive(Debug, Eq, PartialEq, Clone)]
 pub struct SetReportingModeResponse {
   pub query: bool,
-  pub active: bool,
+  pub mode: ReportingMode,
   pub device: u16
 }
 
@@ -178,19 +231,19 @@ impl ResponseParser for SetReportingModeResponse {
   fn parse(mut buf: &[u8]) -> Response {
     buf.advance(3);
     let query = buf.get_u8() == 0x00;
-    let active = buf.get_u8() == 0x00;
+    let mode = ReportingMode::from_byte(buf.get_u8());
     buf.advance(1);
     let device = buf.get_u16();
 
     Response::SetReportingMode(SetReportingModeResponse {
       query,
-      active,
+      mode,
       device,
     })
   }
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Clone)]
 pub struct QueryResponse {
   // PM2.5 reading in micrograms per cubic meter
   pub pm25: f32,
@@ -214,7 +267,7 @@ impl ResponseParser for QueryResponse {
   }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Eq, PartialEq, Clone)]
 pub struct SetDeviceIdResponse {
   // 2-byte device ID
   device: u16
@@ -230,7 +283,7 @@ impl ResponseParser for SetDeviceIdResponse {
   }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Eq, PartialEq, Clone)]
 pub struct SetSleepWorkResponse {
   pub query: bool,
   pub mode: WorkMode,
@@ -253,7 +306,7 @@ impl ResponseParser for SetSleepWorkResponse {
   }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Eq, PartialEq, Clone)]
 pub struct SetWorkingPeriodResponse {
   /// if true, queries the current state; if false, sets the working period
   pub query: bool,
@@ -278,7 +331,7 @@ impl ResponseParser for SetWorkingPeriodResponse {
 }
 
 
-#[derive(Debug)]
+#[derive(Debug, Eq, PartialEq, Clone)]
 pub struct GetFirmwareVersionResponse {
   /// year in some mystery format
   pub year: u8,
@@ -300,14 +353,54 @@ impl ResponseParser for GetFirmwareVersionResponse {
   }
 }
 
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+pub enum ReportingMode {
+  /// Sensor reports measurements at a regular interval without being explicitly
+  /// queried.
+  ///
+  /// The interval may be configured with the SetWorkingPeriod command.
+  Active,
 
-#[derive(Debug)]
+  /// Sensor only reports measurements when explicitly queried (via Query
+  /// command)
+  Query
+}
+
+impl ReportingMode {
+  fn from_byte(byte: u8) -> Self {
+    match byte {
+      0x00 => ReportingMode::Active,
+      _ => ReportingMode::Query
+    }
+  }
+
+  fn as_byte(&self) -> u8 {
+    match self {
+      ReportingMode::Active => 0x00,
+      ReportingMode::Query => 0x01
+    }
+  }
+}
+
+impl FromStr for ReportingMode {
+  type Err = Error;
+
+  fn from_str(s: &str) -> Result<Self> {
+    Ok(match s.to_lowercase().as_str() {
+      "active" => ReportingMode::Active,
+      "query" => ReportingMode::Query,
+      _ => return Err(Error::InvalidReportingMode(s.to_string()))
+    })
+  }
+}
+
+#[derive(Debug, Eq, PartialEq, Clone, Copy)]
 pub struct SetReportingMode {
   /// if true, queries the reporting mode; if false, sets it
   pub query: bool,
 
   /// if true, actively reports measurements; if false, sets the mode to query
-  pub active: bool,
+  pub mode: ReportingMode,
 }
 
 impl Command for SetReportingMode {
@@ -315,7 +408,7 @@ impl Command for SetReportingMode {
     bytes.put_u8(0x02);
 
     bytes.put_u8(if self.query { 0x00 } else { 0x01 });
-    bytes.put_u8(if self.active { 0x00 } else { 0x01 });
+    bytes.put_u8(self.mode.as_byte());
 
     // bytes 4-13 are reserved
     //bytes.put(&b"\0\0\0\0\0\0\0\0\0\0"[..]);
@@ -330,7 +423,7 @@ impl Command for SetReportingMode {
   }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Eq, PartialEq, Clone, Copy)]
 pub struct Query;
 
 impl Command for Query {
@@ -345,7 +438,7 @@ impl Command for Query {
   }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Eq, PartialEq, Clone, Copy)]
 pub struct SetDeviceId {
   pub id: u16
 }
@@ -364,7 +457,7 @@ impl Command for SetDeviceId {
 }
 
 
-#[derive(Debug)]
+#[derive(Debug, Eq, PartialEq, Clone, Copy)]
 pub struct SetSleepWork {
   pub query: bool,
   pub mode: WorkMode
@@ -384,7 +477,7 @@ impl Command for SetSleepWork {
   }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Eq, PartialEq, Clone)]
 pub struct SetWorkingPeriod {
   pub query: bool,
   pub working_period: WorkingPeriod
@@ -404,7 +497,7 @@ impl Command for SetWorkingPeriod {
   }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Eq, PartialEq, Clone)]
 pub struct GetFirmwareVersion;
 
 impl Command for GetFirmwareVersion {
@@ -480,7 +573,11 @@ pub enum ControlMessage {
   FatalError(Error),
 }
 
-fn read_thread(port: Box<dyn SerialPort>, tx: Sender<Response>, control_tx: Sender<ControlMessage>) -> JoinHandle<()> {
+fn read_thread(
+  port: Box<dyn SerialPort>,
+  tx: Sender<Response>,
+  control_tx: Sender<ControlMessage>,
+) -> JoinHandle<()> {
   thread::spawn(move || {
     debug!("started read_thread");
 
@@ -530,7 +627,11 @@ fn read_thread(port: Box<dyn SerialPort>, tx: Sender<Response>, control_tx: Send
   })
 }
 
-fn write_thread(mut port: Box<dyn SerialPort>, rx: Receiver<Cmd>, control_tx: Sender<ControlMessage>) -> JoinHandle<()> {
+fn write_thread(
+  mut port: Box<dyn SerialPort>,
+  rx: Receiver<Cmd>,
+  control_tx: Sender<ControlMessage>,
+) -> JoinHandle<()> {
   thread::spawn(move || {
     debug!("started write_thread");
 
@@ -538,8 +639,12 @@ fn write_thread(mut port: Box<dyn SerialPort>, rx: Receiver<Cmd>, control_tx: Se
       let mut buf = BytesMut::new();
       cmd.write(&mut buf);
 
-      match port.write(&buf) {
-        Ok(_) => debug!("sent command: {:?} = {:x?}", cmd, &buf[..]),
+      match port.write_all(&buf) {
+        Ok(_) => {
+          debug!("sent command: {:?} = {:x?}", cmd, &buf[..]);
+
+          //thread::sleep(Duration::from_millis(50));
+        },
         Err(e) => {
           control_tx.send(ControlMessage::FatalError(Error::WriteError(e))).ok();
           break;
@@ -562,13 +667,25 @@ pub fn open_sensor<P: AsRef<OsStr>>(
   response_tx: Sender<Response>,
   control_tx: Sender<ControlMessage>
 ) -> Result<()> {
+  // implementation note: writing commands to the sensor is unreliable
+  // I tried a number of different implementations to reduce the issue, e.g.:
+  //   - mutex while receiving a packet to prevent crosstalk from the write
+  //     thread
+  //   - merging the read and write threads to ensure the two operations were
+  //     never running concurrently
+  // ultimately I've kept this implementation since it feels cleaner and none of
+  // the above helped anyway
+  // probably related to active reporting
+
   let settings = SerialPortSettings {
     baud_rate: 9600,
     data_bits: DataBits::Eight,
     flow_control: FlowControl::None,
     parity: Parity::None,
     stop_bits: StopBits::One,
-    timeout: Duration::from_millis(10000),
+
+    // timeout longer than the worst-case working period
+    timeout: Duration::from_secs(60 * 31)
   };
 
   let read_port = open_with_settings(device.as_ref(), &settings)

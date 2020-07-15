@@ -90,67 +90,8 @@ fn export_reading(
   s.to_string()
 }
 
-fn main() -> Result<()> {
-  env_logger::init();
-
-  let opts = Options::from_args();
-  let port = opts.port;
-
-  let (command_tx, command_rx) = channel();
-  let (response_tx, response_rx) = channel();
-  let (control_tx, control_rx) = channel();
-
-  sds011_exporter::open_sensor(
-    &opts.device,
-    command_rx,
-    response_tx,
-    control_tx
-  )?;
-
-  command_tx.send(GetFirmwareVersion.to_cmd()).ok();
-
-  command_tx.send(SetReportingMode {
-    query: true,
-    active: false
-  }.to_cmd()).ok();
-
-  command_tx.send(SetSleepWork {
-    query: true,
-    mode: WorkMode::Work
-  }.to_cmd()).ok();
-
-  command_tx.send(SetWorkingPeriod {
-    query: true,
-    working_period: WorkingPeriod::Continuous
-  }.to_cmd()).ok();
-
-  loop {
-    for response in response_rx.try_iter() {
-      info!("response: {:?}", response);
-    }
-
-    for control in control_rx.try_iter() {
-      info!("control msg: {:?}", control);
-
-      match control {
-        ControlMessage::Error(e) => {
-          error!("error: {}", e);
-        },
-        ControlMessage::FatalError(e) => {
-          error!("fatal error: {}", e);
-          std::process::exit(1);
-        }
-      }
-    }
-
-    thread::sleep(Duration::from_micros(1000));
-  }
-
-  Ok(())
-}
-
 #[tokio::main]
-async fn main_later() {
+async fn main() {
   env_logger::init();
 
   let opts = Options::from_args();
