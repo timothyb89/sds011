@@ -3,7 +3,7 @@
 
 use std::path::PathBuf;
 use std::sync::mpsc::{channel, Sender, Receiver};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use std::thread;
 
 use anyhow::Result;
@@ -13,9 +13,9 @@ use sds011_exporter::*;
 
 #[derive(Debug, Clone, StructOpt)]
 struct SetWorkModeAction {
-  /// if set, retrieves the current mode and does not set anything
+  /// If set, queries the current state and does not set a value.
   #[structopt(long, short)]
-  get: bool,
+  query: bool,
 
   /// The working mode, one of: work (on), sleep (off)
   mode: WorkMode
@@ -23,9 +23,9 @@ struct SetWorkModeAction {
 
 #[derive(Debug, Clone, StructOpt)]
 struct SetReportingModeAction {
-  /// if set, retrieves the current mode and does not set anything
+  /// If set, queries the current state and does not set a value.
   #[structopt(long, short)]
-  get: bool,
+  query: bool,
 
   /// the reporting mode, one of: active, query
   mode: ReportingMode
@@ -33,8 +33,9 @@ struct SetReportingModeAction {
 
 #[derive(Debug, Clone, StructOpt)]
 struct SetWorkingPeriodAction {
+  /// If set, queries the current state and does not set a value.
   #[structopt(long, short)]
-  get: bool,
+  query: bool,
 
   /// the working period in minutes; 0 for continuous
   ///
@@ -78,75 +79,50 @@ struct Options {
 
 fn info(
   command_tx: Sender<Cmd>,
-  response_rx: Receiver<Response>,
+  response_rx: Receiver<Resp>,
   control_rx: Receiver<ControlMessage>
 ) -> Result<()> {
-  command_tx.send(GetFirmwareVersion.to_cmd())?;
+  let (firmware, _) = retry_send_default(
+    GetFirmwareVersion,
+    &command_tx,
+    &response_rx
+  )?;
 
-  command_tx.send(SetReportingMode {
-    query: true,
-    mode: ReportingMode::Active
-  }.to_cmd())?;
+  let (reporting, _) = retry_send_default(
+    SetReportingMode {
+      query: true,
+      mode: ReportingMode::Active
+    },
+    &command_tx,
+    &response_rx
+  )?;
 
-  command_tx.send(SetSleepWork {
-    query: true,
-    mode: WorkMode::Work
-  }.to_cmd())?;
+  let (working, _) = retry_send_default(
+    SetWorkingPeriod {
+      query: true,
+      working_period: WorkingPeriod::Continuous
+    },
+    &command_tx,
+    &response_rx
+  )?;
 
-  command_tx.send(SetWorkingPeriod {
-    query: true,
-    working_period: WorkingPeriod::Continuous
-  }.to_cmd())?;
+  let (sleeping, _) = retry_send_default(
+    SetSleepWork {
+      query: true,
+      mode: WorkMode::Work
+    },
+    &command_tx,
+    &response_rx
+  )?;
 
-  thread::sleep(Duration::from_millis(100));
+  println!("Device ID:        0x{:x?} ({})", firmware.device, firmware.device);
+  println!("Working mode:     {:?}", sleeping.mode);
+  println!("Reporting mode:   {:?}", reporting.mode);
+  println!("Working period:   {:?}", working.working_period);
+  println!("Firmware version: {:?}", firmware);
 
-  let start = Instant::now();
-  let timeout = Duration::from_millis(2000);
-
-  let mut firmware = None;
-  let mut reporting = None;
-  let mut working = None;
-  let mut sleeping = None;
-
-  loop {
-    for response in response_rx.try_iter() {
-      match response {
-        Response::GetFirmwareVersion(v) => firmware = Some(v),
-        Response::SetReportingMode(m) =>   reporting = Some(m),
-        Response::SetWorkingPeriod(p) =>   working = Some(p),
-        Response::SetSleepWork(s) =>       sleeping = Some(s),
-        r => debug!("ignoring: {:?}", r)
-      }
-    }
-
-    match (&firmware, &reporting, &working, &sleeping) {
-      (Some(f), Some(r), Some(w), Some(s)) => {
-        println!("Device ID:        0x{:x?} ({})", f.device, f.device);
-        println!("Working mode:     {:?}", s.mode);
-        println!("Reporting mode:   {:?}", r.mode);
-        println!("Working period:   {:?}", w.working_period);
-        println!("Firmware version: {:?}", f);
-        break;
-      },
-      _ => ()
-    }
-
-    for control in control_rx.try_iter() {
-      match control {
-        ControlMessage::Error(e) => error!("Error: {:?}", e),
-        ControlMessage::FatalError(e) => {
-          error!("Fatal error: {:?}", e);
-          std::process::exit(1);
-        }
-      }
-    }
-
-    if start.elapsed() > timeout {
-      error!("did not receive status in time");
-      std::process::exit(1);
-    } else {
-      thread::sleep(Duration::from_millis(100));
-    }
+  for message in control_rx.try_iter() {
+    warn!("{:?}", message);
   }
 
   Ok(())
@@ -154,7 +130,7 @@ fn info(
 
 fn watch(
   _command_tx: Sender<Cmd>,
-  response_rx: Receiver<Response>,
+  response_rx: Receiver<Resp>,
   control_rx: Receiver<ControlMessage>
 ) -> Result<()> {
   loop {
@@ -178,101 +154,49 @@ fn watch(
 
 fn set_work_mode(
   command_tx: Sender<Cmd>,
-  response_rx: Receiver<Response>,
+  response_rx: Receiver<Resp>,
   control_rx: Receiver<ControlMessage>,
   action: SetWorkModeAction
 ) -> Result<()> {
-  command_tx.send(SetSleepWork {
-    query: action.get,
-    mode: action.mode,
-  }.to_cmd())?;
-
-  match (action.get, action.mode) {
-    (true, _) => info!("sent working mode query..."),
+  match (action.query, action.mode) {
+    (true, _) => info!("sending working mode query..."),
     (false, mode) => info!("attempting to set working mode: {:?}", mode)
   };
 
-  let start = Instant::now();
-  let timeout = Duration::from_millis(1000);
+  let (response, _) = retry_send_default(SetSleepWork {
+    query: action.query,
+    mode: action.mode,
+  }, &command_tx, &response_rx)?;
 
-  'outer: loop {
-    for response in response_rx.try_iter() {
-      match response {
-        Response::SetSleepWork(r) => {
-          info!("received response: {:?}", r);
-          break 'outer;
-        },
-        r => debug!("ignoring: {:x?}", r)
-      }
-    }
-
-    for control in control_rx.try_iter() {
-      match control {
-        ControlMessage::Error(e) => error!("error: {:?}", e),
-        ControlMessage::FatalError(e) => {
-          error!("Fatal error: {:?}", e);
-          std::process::exit(1);
-        }
-      }
-    }
-
-    if start.elapsed() > timeout {
-      error!("did not receive status in time; try again");
-      std::process::exit(1);
-    } else {
-      thread::sleep(Duration::from_millis(100));
-    }
+  for message in control_rx.try_iter() {
+    warn!("{:?}", message);
   }
+
+  info!("working mode is now: {:?}", response);
 
   Ok(())
 }
 
 fn set_reporting_mode(
   command_tx: Sender<Cmd>,
-  response_rx: Receiver<Response>,
+  response_rx: Receiver<Resp>,
   control_rx: Receiver<ControlMessage>,
   action: SetReportingModeAction
 ) -> Result<()> {
-  command_tx.send(SetReportingMode {
-    query: action.get,
-    mode: action.mode
-  }.to_cmd())?;
-
-  match (action.get, action.mode) {
-    (true, _) => info!("sent reporting mode query..."),
+  match (action.query, action.mode) {
+    (true, _) => info!("sending reporting mode query..."),
     (false, mode) => info!("attempting to set reporting mode: {:?}", mode)
   };
 
-  let start = Instant::now();
-  let timeout = Duration::from_millis(1000);
+  let (response, _) = retry_send_default(SetReportingMode {
+    query: action.query,
+    mode: action.mode
+  }, &command_tx, &response_rx)?;
 
-  'outer: loop {
-    for response in response_rx.try_iter() {
-      match response {
-        Response::SetReportingMode(r) => {
-          info!("received response: {:x?}", r);
-          break 'outer;
-        },
-        r => debug!("ignoring: {:x?}", r)
-      }
-    }
+  info!("reporting mode is now: {:?}", response);
 
-    for control in control_rx.try_iter() {
-      match control {
-        ControlMessage::Error(e) => error!("error: {:?}", e),
-        ControlMessage::FatalError(e) => {
-          error!("Fatal error: {:?}", e);
-          std::process::exit(1);
-        }
-      }
-    }
-
-    if start.elapsed() > timeout {
-      error!("did not receive status in time; try again");
-      std::process::exit(1);
-    } else {
-      thread::sleep(Duration::from_millis(100));
-    }
+  for message in control_rx.try_iter() {
+    warn!("{:?}", message);
   }
 
   Ok(())
@@ -280,58 +204,35 @@ fn set_reporting_mode(
 
 fn set_working_period(
   command_tx: Sender<Cmd>,
-  response_rx: Receiver<Response>,
+  response_rx: Receiver<Resp>,
   control_rx: Receiver<ControlMessage>,
   action: SetWorkingPeriodAction
 ) -> Result<()> {
-  command_tx.send(SetWorkingPeriod {
-    query: action.get,
-    working_period: action.working_period
-  }.to_cmd())?;
-
-  match (action.get, action.working_period) {
+  match (action.query, action.working_period) {
     (true, _) => info!("sent working period query..."),
     (false, period) => info!("attempting to set working period: {:?}", period)
   };
 
-  let start = Instant::now();
-  let timeout = Duration::from_millis(1000);
+  let (response, _) = retry_send_default(SetWorkingPeriod {
+    query: action.query,
+    working_period: action.working_period
+  }, &command_tx, &response_rx)?;
 
-  'outer: loop {
-    for response in response_rx.try_iter() {
-      match response {
-        Response::SetWorkingPeriod(r) => {
-          info!("received response: {:x?}", r);
-          break 'outer;
-        },
-        r => debug!("ignoring: {:x?}", r)
-      }
-    }
+  info!("working period is now: {:?}", response);
 
-    for control in control_rx.try_iter() {
-      match control {
-        ControlMessage::Error(e) => error!("error: {:?}", e),
-        ControlMessage::FatalError(e) => {
-          error!("Fatal error: {:?}", e);
-          std::process::exit(1);
-        }
-      }
-    }
-
-    if start.elapsed() > timeout {
-      error!("did not receive status in time; try again");
-      std::process::exit(1);
-    } else {
-      thread::sleep(Duration::from_millis(100));
-    }
+  for message in control_rx.try_iter() {
+    warn!("{:?}", message);
   }
 
   Ok(())
 }
 
 fn main() -> Result<()> {
-  env_logger::Builder::from_default_env()
-    .filter_level(log::LevelFilter::Debug)
+  let env = env_logger::Env::default()
+    .filter_or("SDS011_LOG", "info")
+    .write_style_or("SDS011_STYLE", "always");
+
+  env_logger::Builder::from_env(env)
     .target(env_logger::Target::Stderr)
     .init();
 

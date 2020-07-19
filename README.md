@@ -30,9 +30,12 @@ The [`sds011-tool`] can be used to configure the device, including:
     * when disabled, the device must be manually queried for measurements
   *
 
-Note that the sensor is remarkably bad at actually receiving messages, so expect
-to run any commands several times before they're actually accepted. Maybe it's
-just my implementation, but who knows.
+Note that the sensor is remarkably bad at actually receiving messages,
+particularly when active reporting is turned on, and particularly when reporting
+continuously as messages tend to conflict with any commands being sent.
+Be sure to check the return code to ensure the expected responses were received
+and retry if necessary. The tool does retry automatically, but this doesn't
+guarantee success.
 
 [`sds011-tool`]: ./src/bin/sds011_tool.rs
 
@@ -40,6 +43,8 @@ just my implementation, but who knows.
 
 The [`sds011-exporter`] starts a web server that returns the current PM2.5 and
 PM10 measurements as either JSON or Prometheus-compatible
+
+[`sds011-exporter`]: ./src/bin/sds011_exporter.rs
 
 ## Alternatives
 
