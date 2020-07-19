@@ -21,14 +21,20 @@ Usage:
 $ sds011-tool /dev/ttyUSB0 info
 ```
 
-The [`sds011-tool`] can be used to configure the device, including:
-  * configuring sleep or work periods
-  * enabling or disabling active reporting
-    * when active reporting is enabled, the device automatically wakes, collects
-      data for 30 seconds, sends a query result, and sleeps for a configurable
-      number of minutes before repeating
-    * when disabled, the device must be manually queried for measurements
-  *
+The [`sds011-tool`] can be used to inspect and configure the device:
+  * `watch`: watches all incoming events, including actively-reported data
+  * `info`: fetches current device configuration and firmware info
+  * `set-reporting-mode [active|query]`: sets the device's reporting mode. If
+    `active`, measurements will be sent proactively by the device at the
+    interval set by `set-working-period`; if `query`, a query command must be
+    sent to retrieve a measurement.
+  * `set-work-mode [work|sleep]`: sets the device working mode, i.e. on or off.
+    Note that while working physically moving parts are active and may
+    contribute to wear over time.
+  * `set-working-period [n]`: sets the working period when actively reporting
+    data; 0 is continuous and reports every second, 1-30 (inclusive) is a period
+    in minutes where the device sleeps for `(n minutes) - 30 seconds`, collects
+    a measurement for 30 seconds, sends a measurement, and repeats.
 
 Note that the sensor is remarkably bad at actually receiving messages,
 particularly when active reporting is turned on, and particularly when reporting

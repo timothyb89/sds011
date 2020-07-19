@@ -113,6 +113,12 @@ fn read_thread(
       // checksum:  1 byte
       // tail:      1 byte (0xAB)
 
+      // unfortunately if there's any crosstalk on the port (either from our own
+      // write thread or from the sensor itself), packets tend to become corrupt
+      // it's easy enough to work around this with gratuitous retries and some
+      // acceptance of lost actively-reported queries, but we do have to sanely
+      // handle partial packets here
+
       if let Some(packet) = current_packet.as_mut() {
         packet.put_u8(byte);
 

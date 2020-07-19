@@ -28,10 +28,6 @@ struct Options {
   port: u16,
 }
 
-struct Reading {
-  pm25: f32,
-  pm10: f32
-}
 
 enum MaybeReading {
   Ok(Reading),
