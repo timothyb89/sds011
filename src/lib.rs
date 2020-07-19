@@ -15,10 +15,10 @@ use serialport::{
 };
 use thread::JoinHandle;
 
-mod error;
-mod util;
-mod command;
-mod response;
+pub mod error;
+pub mod util;
+pub mod command;
+pub mod response;
 
 pub use util::*;
 pub use command::*;

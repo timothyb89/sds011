@@ -1,15 +1,19 @@
-
 #[macro_use] extern crate log;
 
+use std::str::FromStr;
 use std::path::PathBuf;
 use std::sync::mpsc::{channel, Sender, Receiver};
 use std::time::Duration;
 use std::thread;
 
-use anyhow::Result;
+use chrono::{Utc, SecondsFormat};
+use sds011_exporter::command::*;
+use sds011_exporter::response::*;
+use sds011_exporter::util::*;
+use sds011_exporter::{retry_send_default, ControlMessage};
+use serde_json::json;
 use structopt::StructOpt;
-
-use sds011_exporter::*;
+use anyhow::{anyhow, Error, Result};
 
 #[derive(Debug, Clone, StructOpt)]
 struct SetWorkModeAction {
@@ -44,6 +48,34 @@ struct SetWorkingPeriodAction {
   working_period: WorkingPeriod
 }
 
+#[derive(Debug, Copy, Clone)]
+enum OutputMode {
+  None,
+  JSON,
+  CSV
+}
+
+impl FromStr for OutputMode {
+  type Err = Error;
+  fn from_str(s: &str) -> Result<Self, Self::Err> {
+    match s.to_ascii_lowercase().as_str() {
+      "" | "none" => Ok(OutputMode::None),
+      "json" => Ok(OutputMode::JSON),
+      "csv" => Ok(OutputMode::CSV),
+      s => Err(anyhow!("invalid output mode '{}', expected one of: none, json, csv", s))
+    }
+  }
+}
+
+#[derive(Debug, Clone, StructOpt)]
+struct WatchAction {
+  /// If set, writes incoming queries to stdout in the given format. Note that
+  /// log messages are always written to stderr. JSON messages are one JSON
+  /// object per line. One of: none, json, csv
+  #[structopt(long, short, default_value = "none")]
+  output_mode: OutputMode
+}
+
 #[derive(Debug, Clone, StructOpt)]
 #[structopt(rename_all = "kebab-case")]
 enum Action {
@@ -51,7 +83,7 @@ enum Action {
   Info,
 
   /// Displays sensor events
-  Watch,
+  Watch(WatchAction),
 
   /// Sets the sensor's working mode (work / sleep)
   SetWorkMode(SetWorkModeAction),
@@ -128,14 +160,39 @@ fn info(
   Ok(())
 }
 
+fn format_query(query: &QueryResponse, mode: &OutputMode) -> Result<()> {
+  let datetime = Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true);
+
+  match mode {
+    OutputMode::None => (),
+    OutputMode::CSV => println!("{},{},{}", datetime, query.pm25, query.pm10),
+    OutputMode::JSON => println!("{}", serde_json::to_string(&json!({
+      "datetime": datetime,
+      "pm25": query.pm25,
+      "pm10": query.pm10
+    }))?)
+  }
+
+  Ok(())
+}
+
 fn watch(
   _command_tx: Sender<Cmd>,
   response_rx: Receiver<Resp>,
-  control_rx: Receiver<ControlMessage>
+  control_rx: Receiver<ControlMessage>,
+  action: WatchAction
 ) -> Result<()> {
+  if let OutputMode::CSV = &action.output_mode {
+    println!("datetime,pm25,pm10");
+  }
+
   loop {
     for response in response_rx.try_iter() {
       info!("{:x?}", response);
+
+      if let Resp::Query(q) = &response {
+        format_query(q, &action.output_mode)?;
+      }
     }
 
     for control in control_rx.try_iter() {
@@ -251,7 +308,7 @@ fn main() -> Result<()> {
 
   match opts.action {
     Action::Info => info(command_tx, response_rx, control_rx),
-    Action::Watch => watch(command_tx, response_rx, control_rx),
+    Action::Watch(action) => watch(command_tx, response_rx, control_rx, action),
     Action::SetWorkMode(action) => set_work_mode(command_tx, response_rx, control_rx, action),
     Action::SetReportingMode(action) => set_reporting_mode(command_tx, response_rx, control_rx, action),
     Action::SetWorkingPeriod(action) => set_working_period(command_tx, response_rx, control_rx, action)
